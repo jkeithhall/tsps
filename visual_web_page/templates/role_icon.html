@@ -1,0 +1,15 @@
+{% macro render_icon(role) %}
+{% if 'manager' in role %}
+<i class="oma oma-person-in-tuxedo oma-3x"></i>
+{% elif 'developer' in role or 'engineer' in role%}
+<i class="oma oma-technologist oma-3x"></i>
+{% elif 'tester' in role %}
+<i class="oma oma-farmer oma-3x"></i>
+{% elif 'evaluate' in role %}
+<i class="oma oma-judge oma-3x"></i>
+{% elif 'reviewer' in role %}
+<i class="oma oma-teacher oma-3x"></i>
+{% else %}
+<i class="oma oma-mechanic oma-3x"></i>
+{% endif %}
+{% endmacro %}

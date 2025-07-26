@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Task List</title>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='index.css') }}">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='overview.png') }}">
+</head>
+
+<body>
+    <div class="container">
+        <h1>Tasks ({{ tasks|length }})</h1>
+        <div class="task-list">
+            <ul>
+                {% for task in tasks %}
+                <li><a href="{{ url_for('task', task_id=task[0]) }}">{{ task[1].split("/")[-1] }}</a></li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</body>
+
+</html>

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='openmoji-black-awesome.css') }}">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='openmoji-color-awesome.css') }}">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='task.css') }}">
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/11.3.1/styles/default.min.css">
+    <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/11.3.1/highlight.min.js"></script>
+    <title>{{ task_name }}</title>
+    <link rel="shortcut icon" href="{{ url_for('static', filename='knot.png') }}">
+</head>
+
+<body>
+
+    {% set ns = namespace(meeting_start=False, meeting_end=False, current_role=None, exist_role_list=[]) %}
+    {% from 'role_icon.html' import render_icon %}
+
+    <div class="chat-box">
+        <div class="chat-header">
+            <div class="left-button">
+                <a href="../version/{{version}}" class="elegant-back-button"><i class="oma oma-overview oma-2x"></i></a>
+            </div>
+            <div class="chat-header-text">
+                Solving the Task <a href="{{ pr_url }}">{{ task_name }}</a>
+            </div>
+            <div class="right-button">
+                <a href="./{{ task_id + 1}}" class="elegant-back-button"><i class="oma oma-next-track-button oma-2x"></i></a>
+            </div>
+        </div>
+
+
+        {% for process in process_content %}
+
+        {% if not ns.meeting_start and "What should be your opening statement for the meeting" in process[1][2] %}
+        {% set ns.meeting_start = True %}
+        <div class="system-message">
+            Meeting Started <i class="oma oma-comment oma-bg"></i>
+        </div>
+        {% elif ns.meeting_start and not ns.meeting_end and "what concise statement should you make to conclude the meeting" in
+        process[1][2] %}
+        {% set ns.meeting_end = True %}
+        {% endif %}
+
+        {% if process[0] == 1 %}
+
+        <div class="system-message">
+            {% if process[1][2] in ns.exist_role_list %}
+            <a href="#role_{{ process[1][0] }}">{{ process[1][2] }}</a> is refreshed : )
+            {% else %}
+            {{ render_icon(role_content[process[1][0]][0]) }} <a href="#role_{{ process[1][0] }}">{{ process[1][2] }}</a> is joined : )
+            {% set ns.exist_role_list = ns.exist_role_list + [process[1][2]] %}
+            {% endif %}
+        </div>
+
+        {% elif process[0] == 2 and not ns.meeting_start%}
+            
+        <div class="chat-message">
+            <div class="user-icon" id="#role_{{ process[1][1] }}">
+                {{ render_icon(role_content[process[1][1]][0]) }}
+                <i class="oma oma-white-question-mark oma-lg"></i>
+                <div class="role_name">{{ role_content[process[1][1]][1] }}</div>
+            </div>
+            <div class="info-box" style="display: none;">
+                <div class="role-title">{{ role_content[process[1][1]][1] }}</div>
+                <div class="role-content">{{ role_content[process[1][1]][0] }}</div>
+                <br>
+                <div class="role-content">User Path: {{ role_content[process[1][1]][3] }}</div>
+                <div class="role-content">Role Index: {{ process[1][1] }}</div>
+            </div>
+            <div class="user-message">
+                <pre><code id="code-block_{{process[1][0]}}">{{ process[1][2] }}</code></pre>
+            </div>
+            <button class="toggleButton">Expand</button>
+        </div>
+
+        {% elif process[0] == 3 %}
+
+            {% if not ns.meeting_start %}
+            <div class="chat-message chat-message-right">
+                <div class="user-icon">
+                    <i class="oma oma-robot oma-3x"></i>
+                    <i class="oma oma-speech-balloon oma-lg"></i>
+                </div>
+                <div class="info-box info-box-right" style="display: none;">
+                    {{ process[1][1] }}
+                </div>
+                <div class="user-message">
+                    <pre><code id="code-block_{{process[1][0]}}">{{ process[1][2] }}</code></pre>
+                </div>
+                <button class="toggleButton">Expand</button>
+            </div>
+            <br><br>
+            {% else %}
+            <div class="chat-message">
+                <div class="user-icon" id="#role_{{ ns.current_role }}">
+                    {{ render_icon(role_content[ns.current_role][0]) }}
+                    <i class="oma oma-white-speech-balloon oma-lg"></i>
+                    <div class="role_name">{{ role_content[ns.current_role][1] }}</div>
+                </div>
+                <div class="info-box" style="display: none;">
+                    <div class="role-title">{{ role_content[ns.current_role][1] }}</div>
+                    <div class="role-content">{{ role_content[ns.current_role][0] }}</div>
+                    <br>
+                    <div class="role-content">User Path: {{ role_content[ns.current_role][3] }}</div>
+                    <div class="role-content">Role Index: {{ ns.current_role }}</div>
+                </div>
+                <div class="user-message">
+                    {% if process[1][2] == '<NONE>' %}
+                    <pre style="color: grey">(No more to say)</pre>
+                    {% else %}
+                    <pre>{{ process[1][2] }}</pre>
+                    {% endif %}
+                </div>
+                <button class="toggleButton">Expand</button>
+            </div>
+            {% endif %}
+
+            {% if ns.meeting_start and ns.meeting_end %}
+            {% set ns.meeting_start = False %}
+            {% set ns.meeting_end = False %}
+            <div class="system-message">
+                Meeting Finished <i class="oma oma-comment oma-bg"></i>
+            </div>
+            {% endif %}
+
+
+        {% elif process[0] == 4 %}
+
+        <div class="system-message">
+            {% if process[1][1] is defined and process[1][1] is string and ((process[1][1] | regex_match('^<table>')) or process[1][1] | regex_match("^<table class='member_table'>")) %}
+            <div class="table-box">
+                {{ process[1][1] | safe}}
+            </div>
+            {% elif process[1][1] is defined and process[1][1] is string and (process[1][1] | regex_match("^<div class='code-diff'>")) %}
+                {{ process[1][1] | safe}}
+            {% elif process[1][1] is defined and process[1][1] is string %}
+            {{ process[1][1] }}
+            {% endif %}
+        </div>
+
+        {% endif %}
+
+        {% if ns.meeting_start %}
+        {% set ns.current_role = process[1][1] %}
+        {% endif %}
+
+        
+        {% endfor %}
+
+        <br><br>
+    </div>
+
+    <button id="backToTop" style="display: none;"><i class="oma oma-up-arrow oma-bg"></i></button>
+    <button id="goToBottom" style="display: block;"><i class="oma oma-down-arrow oma-bg"></i></button>
+
+    <script src="{{ url_for('static', filename='task.js') }}"></script>
+
+</body>
+
+</html>

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Version List</title>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='index.css') }}">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='overview.png') }}">
+</head>
+
+<body>
+    <div class="container">
+        <h1>Versions</h1>
+        <ul>
+            {% for version in versions %}
+            <li><a href="{{ url_for('version', version_id=version[0]) }}">{{ version[0] }}</a></li>
+            {% endfor %}
+        </ul>
+    </div>
+</body>
+
+</html>

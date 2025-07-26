@@ -1,0 +1,258 @@
+.chat-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #f0f0f0;
+    padding: 10px;
+    font-weight: bold;
+    border-bottom: 1px solid #ddd;
+}
+
+.left-button,
+.right-button {
+    min-width: 100px;
+}
+
+.chat-header-text {
+    flex-grow: 1;
+    text-align: center;
+    margin: 0 20px;
+}
+
+.elegant-back-button {
+    display: inline-block;
+    padding: 10px 20px;
+    border-radius: 5px;
+    color: grey;
+    text-decoration: none;
+    font-size: 15px;
+    transition: background-color 0.3s, color 0.3s;
+}
+
+.elegant-back-button:hover {
+    background-color: white;
+    color: #0056b3;
+}
+
+.chat-box {
+    max-width: 100%;
+    margin: 20px auto;
+    border: 1px solid #ddd;
+    box-shadow: 0px 0px 10px #ddd;
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+.chat-message {
+    padding: 15px;
+    font-family: Arial, sans-serif;
+    position: relative;
+    min-height: 100px;
+}
+
+.chat-message-right {
+    position: relative;
+    text-align: right;
+}
+
+.chat-message-right .user-icon {
+    position: absolute;
+    right: 10px;
+    top: 10px;
+    z-index: 1;
+}
+
+.chat-message-right .toggleButton {
+    position: absolute;
+    right: 10px;
+    margin-top: 10px;
+}
+
+.chat-message-right .user-message {
+    padding: 10px;
+    margin-right: 60px;
+    border-radius: 10px;
+    text-align: left;
+    word-wrap: break-word;
+    max-height: 168px;
+    overflow-y: auto;
+    max-width: calc(100% - 50px - 60px);
+}
+
+table td {
+    align: center;
+    max-width: 600px;
+    padding: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.code-diff {
+    text-align: left;
+    font-family: 'Consolas', 'Monaco', monospace;
+    background-color: #f8f8f8;
+    border: 1px solid #e1e1e8;
+    padding: 10px;
+    margin: 20px 0;
+}
+
+.code-diff .header {
+    font-family: Arial, sans-serif;
+    text-align: center;
+    font-size: 1.2em;
+    color: #333;
+    margin-bottom: 10px;
+    font-weight: bold;
+}
+
+pre {
+    white-space: pre-wrap;
+    white-space: -moz-pre-wrap;
+    white-space: -pre-wrap;
+    white-space: -o-pre-wrap;
+    word-wrap: break-word;
+}
+
+.user-icon {
+    position: absolute;
+    left: 6px;
+    top: 16px;
+    z-index: 1;
+}
+
+.role_name {
+    max-width: 50px;
+    overflow: hidden;
+    font-size: smaller;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+}
+
+.info-box {
+    position: absolute;
+    max-width: 50%;
+    max-height: 68px;
+    overflow-y: auto;
+    background-color: white;
+    margin-left: 50px;
+    border-radius: 10px;
+    padding: 10px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+    display: none;
+}
+
+.info-box-right {
+    position: absolute;
+    max-width: 50%;
+    max-height: 68px;
+    overflow-y: auto;
+    background-color: white;
+    margin-right: 80px;
+    margin-bottom: 60px;
+    border-radius: 10px;
+    padding: 10px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+    display: none;
+    right: 0;
+}
+
+
+.user-message {
+    background-color: #e0e0e0;
+    padding: 10px;
+    margin-left: 50px;
+    border-radius: 10px;
+    text-align: left;
+    word-wrap: break-word;
+    max-height: 168px;
+    overflow-y: auto;
+    max-width: calc(100% - 66px - 60px);
+}
+
+.system-message {
+    background-color: #fcfcfc;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 10px 15px;
+    margin: 10px 0;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    color: #5d5d5d;
+    text-align: center;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.user-message.expanded {
+    max-height: 80vh;
+}
+
+.toggleButton {
+    padding: 5px 10px;
+    background-color: #0056b3;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    margin-top: 10px;
+}
+
+.toggleButton:hover {
+    background-color: #007bff;
+}
+
+
+@media (max-width: 600px) {
+    .user-message {
+        margin-left: 30px;
+    }
+
+    .user-icon {
+        left: 5px;
+        top: 5px;
+    }
+}
+
+.oma-white-question-mark {
+    position: absolute;
+    top: 0;
+    right: 0;
+}
+
+.oma-speech-balloon {
+    position: absolute;
+    top: 0;
+    right: 0;
+}
+
+.role-title {
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.role-content {
+    margin-bottom: 5px;
+}
+
+#backToTop,
+#goToBottom {
+    position: fixed;
+    bottom: 15px;
+    left: 15px;
+    z-index: 99;
+    border: none;
+    outline: none;
+    background-color:#0056b3;
+    color: white;
+    cursor: pointer;
+    padding: 15px;
+    border-radius: 10px;
+    display: none;
+    opacity: 0.2;
+}
+
+#backToTop:hover,
+#goToBottom:hover {
+    opacity: 1;
+}
