@@ -51,7 +51,7 @@ python process.py
 
 You can now open the webpage to view the visualization, as shown below:
 
-![example](visual_web_page/example.png)
+![example](../../visual_web_page/example.png)
 
 
 
