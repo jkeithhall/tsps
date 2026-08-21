@@ -4,6 +4,7 @@ from log import *
 from common import *
 from manager import Manager
 from custodian import Custodian
+from transactional_state import TransactionalSharedState
 import config
 
 import argparse
@@ -60,6 +61,21 @@ class Meeting:
     
 def main(args):
     try:
+        enable_tsps = getattr(args, "enable_tsps", config.enable_tsps)
+        # Shared Transactional State for this task, created once here (the orchestrator)
+        # so the Custodian can populate it and the Manager/members can share it. Keyed by
+        # the instance id and reset for fresh-run isolation.
+        state = None
+        if enable_tsps:
+            try:
+                state = TransactionalSharedState(repo_key=os.path.basename(args.repo_local_path))
+                state.reset()
+            except Exception as e:
+                logger.error(f"Failed to create TransactionalSharedState: {e}")
+                state = None
+        else:
+            logger.info("TSPS disabled for this run; using non-transactional ablation mode.")
+
         # (Step 0): prepare the candidate file list
         if args.candidate_file_path_list is None:
             args.candidate_file_path_list = []
@@ -69,7 +85,8 @@ def main(args):
             logger.info("Ask the custodian to find the candidate file list ...")
             custodian = Custodian(repo_full_name, issue_number, issue_content, 
                                   model_name=args.model_name, use_cache=True,
-                                  repository_directory = args.repo_local_path, bm_top_k = args.bm_top_k)
+                                  repository_directory = args.repo_local_path, bm_top_k = args.bm_top_k,
+                                  state=state)
             args.candidate_file_path_list = custodian.get_candidate_file_list()
 
         if args.only_find_file_list:
@@ -78,7 +95,8 @@ def main(args):
         # Step 1: prepare team members
         manager = Manager(args.requirement_file_path, args.repo_local_path, \
                           model_name=args.model_name, candidate_file_path_list = args.candidate_file_path_list, \
-                          granularity=args.granularity, prepare_member_folder=False, version=args.version, hints_text=args.hints_text)
+                          granularity=args.granularity, prepare_member_folder=False, version=args.version, \
+                          hints_text=args.hints_text, state=state, enable_tsps=enable_tsps)
         # ## Step 2: group meeting (double check each one's plan for the whole requirement on this project)
         kick_off_meeting_target = ( "1. Verify if the combination of instructions received by all team members is sufficient to resolve the Issue."
                                     "2. Evaluate whether the tasks assigned to each member can be executed simultaneously."
@@ -115,7 +133,9 @@ if __name__ == "__main__":
     parser.add_argument("--granularity", type=str, default="file", help="Granularity of the processing")
     parser.add_argument("--only_find_file_list", type=bool, default=False, help="Only find file list")
     parser.add_argument("--bm_top_k", type=int, default=20, help="Top k for BM25")
-    parser.add_argument("--model_name", default="gpt-4-0613", help="Default model name")
+    parser.add_argument("--model_name", default=config.default_model_name, help="Chat model id")
     parser.add_argument("--hints_text", action="store_true", help="(Optional) Use hints_text with issue description") # TODO
+    parser.add_argument("--enable_tsps", action=argparse.BooleanOptionalAction, default=config.enable_tsps,
+                        help="Enable TSPS orchestration (default: on). Pass --no-enable-tsps for ablation runs.")
     args = parser.parse_args()
     main(args)

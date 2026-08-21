@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 
 from operate import *
 from chat_with_LLM import chat
@@ -12,11 +13,25 @@ from quality_assurance import CodeReviewer
 logger = log(__name__).get_log_obj()
 
 
+def _extract_fenced_code(response: str, lexer_name: str) -> str:
+    """Extract code from the last ```{lexer} fenced block in an LLM response.
+
+    Using the *last* block handles self-corrections ("wait, let me fix...") where
+    the model emits a draft block then a corrected one. Taking the first block
+    instead can silently commit a no-op diff when the draft still matches the
+    original file."""
+    marker = f"```{lexer_name}\n"
+    if marker not in response:
+        return response
+    return response.split(marker)[-1].split("\n```")[0]
+
+
 # Team Member
 class Member:
     def __init__(self, role_system_prompt, file_path, requirement, task_description, project_name, \
                  virtual_env_folder, model_name, use_cache=True, email_domain="itaowe.com", \
-                 prepare_member_folder=True, db_manager=None, task_index=None):
+                 prepare_member_folder=True, db_manager=None, task_index=None, experiment_version=None,
+                 reserved_usernames=None):
         self.system_prompt = role_system_prompt
         self.requirement = requirement
         if isinstance(self.requirement, list):
@@ -32,16 +47,30 @@ class Member:
         self.name = get_name(role_system_prompt, self.model_name, self.use_cache)
         logger.info(f"Member role: {role_system_prompt}\nMember name: {self.name}")
 
-        # prepraing the folder for this member
-        self.username = '_'.join(self.name.split())
-        self.username = to_safe_folder_name(self.username)
+        # Preparing the folder for this member. Usernames must be unique within a
+        # team so each developer's gen.patch lands in a distinct path (multifile
+        # runs often hire the same persona for multiple oracle files).
+        reserved = reserved_usernames if reserved_usernames is not None else set()
+        base_username = to_safe_folder_name('_'.join(self.name.split()))
+        self.username = base_username
+        count = 0
+
+        def _username_taken(username: str) -> bool:
+            if username in reserved:
+                return True
+            if os.path.exists(os.path.join(self.virtual_env_folder, username)):
+                return True
+            exp_member_dir = os.path.join(
+                config.exp_result_save_path, self.project_name, username)
+            return os.path.exists(exp_member_dir)
+
+        while _username_taken(self.username):
+            count += 1
+            self.username = f"{base_username}_{count}"
+        reserved.add(self.username)
+
         self.user_path = os.path.join(self.virtual_env_folder, self.username)
         if prepare_member_folder or not os.path.exists(self.user_path):
-            count = 0
-            while os.path.exists(self.user_path):
-                count += 1
-                self.username = f"{self.username}_{count}"
-                self.user_path = os.path.join(virtual_env_folder, self.username)
             os.makedirs(self.user_path, exist_ok=True)
         
         self.project_path = os.path.abspath(os.path.join(self.user_path, self.project_name))
@@ -61,9 +90,20 @@ class Member:
 
         self.db_manager = db_manager
         self.task_index = task_index
+        self.experiment_version = experiment_version
+        if self.experiment_version is None and db_manager is not None and task_index is not None:
+            row = db_manager._fetchone(
+                "SELECT version FROM task WHERE task_index = ?", (task_index,)
+            )
+            if row and row[0] is not None:
+                self.experiment_version = int(row[0])
         self.role_index = None
         if self.db_manager is not None and self.task_index is not None:
             self.role_index = db_manager.add_role(task_index, self.system_prompt, self.name, self.username, role_file_path)
+
+        # Transactional Shared Program State; set by the Manager after team formation.
+        # When None (e.g. TSS init failed), work() falls back to the original behavior.
+        self.state = None
 
         self.make_plan()
 
@@ -138,6 +178,18 @@ class Member:
                                     model_name=self.model_name, use_cache=self.use_cache, 
                                     db_manager=self.db_manager, task_index=self.task_index, issue_bkgrd=self.requirement_text)
         for try_i in range(max_try_times):
+            # Pull / rebase: before regenerating, reconcile this member's working tree
+            # to the committed snapshot (abort-and-rebase). A discarded write resets to
+            # committed state and any teammate-changed dependencies appear, so the agent
+            # regenerates against ground truth instead of stale context. Scoped to the
+            # member's file + its dependency neighbors so its git diff stays focused.
+            if getattr(self, "state", None) is not None and isinstance(self.file_path, str):
+                try:
+                    refreshed = self.state.pull(self.project_path, [self.file_path])
+                    if refreshed:
+                        logger.info(f"[TSS] {self.name} pulled latest state for {refreshed}")
+                except Exception as e:
+                    logger.error(f"[TSS] pull failed for {self.name}: {e}")
             try:
                 if add_review is not None:
                     after_review_info = (f"## Last Round of Code Modification and Its Review\n"
@@ -180,6 +232,10 @@ class Member:
                             range_list.append([begin_line_number, end_line_number])
                     begin_line_number = min([x[0] for x in range_list])
                     end_line_number = max([x[1] for x in range_list])
+                    if begin_line_number < 1 or end_line_number < begin_line_number:
+                        raise ValueError(
+                            f"invalid line range {begin_line_number}-{end_line_number}"
+                        )
 
                     logger.info(f"begin_line_number: {begin_line_number}\nend_line_number: {end_line_number}\n")
                     self.db_manager.add_action(self.task_index, 
@@ -218,7 +274,7 @@ class Member:
                     self.db_manager.add_action(self.task_index, f"{self.name} changed the code of {self.file_path} shown below")
 
                     new_version_file_content = \
-                        new_file_content_response.split(f"```{get_lexer_for_filename(self.file_path).name}\n", 1)[1].split('\n```')[0]
+                        _extract_fenced_code(new_file_content_response, get_lexer_for_filename(self.file_path).name)
                     logger.info(f"new_version_file_content:\n{new_version_file_content}\n")
                     first_line_space_count = len(new_version_file_content.split("\n")[0]) - len(new_version_file_content.split("\n")[0].lstrip(' '))
                     if first_line_space_count == 0:
@@ -251,7 +307,7 @@ class Member:
                     logger.debug(f"\nfile_path: {self.file_path}\nnew content:\n{new_file_content_response}\n")
                     self.db_manager.add_action(self.task_index, f"{self.name} changed the code of {self.file_path} shown below")
                     new_version_file_content = \
-                        new_file_content_response.split(f"```{get_lexer_for_filename(self.file_path).name}\n", 1)[1].split('\n```')[0]
+                        _extract_fenced_code(new_file_content_response, get_lexer_for_filename(self.file_path).name)
                     logger.info(f"new_version_file_content:\n{new_version_file_content}\n")
 
                     logger.info(f"self.user_path:{self.user_path}")
@@ -281,6 +337,46 @@ class Member:
             logger.info(f"Code diff saved at {os.path.join(save_dir, f'gen_{try_i}.patch')}")
             self.db_manager.add_action(self.task_index, f"{self.name} saved the code diff at {os.path.join(save_dir, f'gen_{try_i}.patch')}")
 
+            # No-op write detection: an empty diff can happen either via the bare `except:`
+            # above (a crash, already logged as "failed to change the code of ...") or
+            # silently, when the model complies with the expected format but echoes back
+            # unchanged content (no exception at all). Log this signature explicitly so
+            # both failure modes are equally visible, and — when attempts remain and
+            # review/test are both disabled — retry instead of letting a no-op fall
+            # through to TSPS as a spuriously "clean" commit.
+            if not code_diff.strip():
+                self.db_manager.add_action(self.task_index,
+                    f"{self.name} produced no change to {self.file_path} (empty diff) on attempt {try_i+1}.")
+                if try_i + 1 < max_try_times and not review and not test:
+                    add_review = (
+                        f"Your previous attempt made no change to `{self.file_path}`. This file has been "
+                        f"confirmed to require a modification for this issue — even if you believe the fix "
+                        f"belongs elsewhere, you must still make a concrete edit to this exact file. Try again."
+                    )
+                    logger.info(f"[TSS] {self.name} produced an empty diff for {self.file_path}; retrying "
+                                f"(attempt {try_i+1}/{max_try_times}) instead of committing a no-op.")
+                    continue
+
+            # Transactional Shared State gate: submit the proposed change as a contract
+            # instead of trusting the raw file write. A rejection (semantic conflict or
+            # lock contention) is fed back into THIS retry loop via add_review, so the
+            # existing max_try_times loop doubles as the retry-after-conflict loop.
+            if getattr(self, "state", None) is not None and isinstance(self.file_path, str):
+                txn_result = self._submit_to_state(attempt_number=try_i)
+                if txn_result is not None and not txn_result.accepted:
+                    add_review = self._render_state_rejection(txn_result)
+                    logger.info(f"[TSS] {self.name}'s change to {self.file_path} REJECTED "
+                                f"({txn_result.rejection_reason}): {txn_result.detail}")
+                    self.db_manager.add_action(self.task_index,
+                        f"{self.name}'s change to {self.file_path} was rejected by shared state "
+                        f"({txn_result.rejection_reason}). Retrying with updated context.")
+                    continue
+                elif txn_result is not None:
+                    logger.info(f"[TSS] {self.name}'s change to {self.file_path} committed to shared "
+                                f"state (versions {txn_result.committed_versions}).")
+                    self.db_manager.add_action(self.task_index,
+                        f"{self.name}'s change to {self.file_path} was committed to shared state.")
+
             if not review and not test:
                 break
 
@@ -302,7 +398,104 @@ class Member:
                     elif code_review_decision == 2:
                         logger.info(f"After {try_i+1} time(s) code review, the code change for {self.file_path} by {self.name} is partially accepted.")
 
-        with open(os.path.join(save_dir, f"gen.patch"), "w") as f:
-            f.write(code_diff)
-        logger.info(f"Finally, Code diff saved at {os.path.join(save_dir, f'gen.patch')}")
+        gen_patch_path = os.path.join(save_dir, "gen.patch")
+        if (not code_diff.strip() and os.path.exists(gen_patch_path)
+                and open(gen_patch_path, encoding="utf-8").read().strip()):
+            logger.warning(
+                "Keeping existing non-empty gen.patch at %s "
+                "(this attempt produced no diff for %s).",
+                gen_patch_path, self.file_path,
+            )
+        else:
+            with open(gen_patch_path, "w", encoding="utf-8") as f:
+                f.write(code_diff)
+        logger.info(f"Finally, Code diff saved at {gen_patch_path}")
         self.db_manager.add_action(self.task_index, f"Finally, {self.name} saved the code diff at {os.path.join(save_dir, f'gen.patch')}")
+
+    def _submit_to_state(self, attempt_number=0):
+        """Submit this member's freshly-written file as a transaction contract.
+
+        Reads the raw on-disk content (the same bytes that produce gen.patch),
+        builds a contract (import-derived assumptions + Widen-on-Ambiguity), and
+        submits it. Every attempt (commit AND reject) is recorded in the
+        transaction_metrics table. Returns the TransactionResult, or None when
+        there is nothing to submit (file missing / unreadable)."""
+        file_abs = os.path.join(self.project_path, self.file_path)
+        if not os.path.exists(file_abs):
+            return None
+        try:
+            with open(file_abs, "r", encoding="utf-8") as f:
+                new_content = f.read()
+        except (OSError, UnicodeDecodeError):
+            return None
+        contract = self.state.build_contract(self.username, self.file_path, new_content,
+                                             local_repo_dir=self.project_path)
+        result = self.state.submit_transaction(contract)
+        # Retain the contract so a subsequent rejection can be rendered into a
+        # line-precise, developer-framed delta.
+        self._last_txn_contract = contract
+        self._log_transaction_metric(contract, result, attempt_number)
+        return result
+
+    def _log_transaction_metric(self, contract, result, attempt_number):
+        """Record one transaction attempt to the transaction_metrics table.
+
+        Logged for commits AND rejections so rejection *rates* (not just outcomes)
+        are computable, with widening_kind / rejection_reason / invalidated_by_* and
+        the static-vs-sensor timing split feeding the trade-off analyses. Best-effort:
+        never lets bookkeeping abort the work."""
+        if self.db_manager is None or result is None:
+            return
+        try:
+            widening = getattr(contract, "widening", None)
+            widening_count = widening.total if widening is not None else 0
+            widening_kind = None
+            if widening is not None and widening.events:
+                widening_kind = ",".join(sorted(widening.counts().keys()))
+            self.db_manager.add_transaction_metric(
+                txn_id=str(uuid.uuid4()),
+                instance_id=self.project_name,
+                agent_id=self.username,
+                attempt_number=attempt_number,
+                status=result.status,
+                widening_events_count=widening_count,
+                widening_kind=widening_kind,
+                rejection_reason=result.rejection_reason,
+                invalidated_by_symbol=result.invalidated_by_symbol,
+                invalidated_by_agent=result.invalidated_by_agent,
+                sensor_kind=getattr(result, "sensor_kind", None),
+                static_check_ms=result.static_check_ms,
+                sensor_check_ms=result.sensor_check_ms,
+                experiment_version=self.experiment_version,
+            )
+        except Exception as e:
+            logger.error(f"[TSS] failed to log transaction metric for {self.name}: {e}")
+
+    def _render_state_rejection(self, result):
+        """Render a transaction rejection into developer-facing feedback.
+
+        Deterministic (no LLM call): delegates to the shared state's per-category
+        renderer, which builds a developer-framed delta (old->new ground truth,
+        committer + recency, exact stale line numbers from Tier-2 reference edges,
+        refreshed authoritative snippet). The result flows into the next prompt
+        through the existing add_review -> after_review_info channel. Falls back to
+        a minimal summary if rendering is unavailable."""
+        contract = getattr(self, "_last_txn_contract", None)
+        state = getattr(self, "state", None)
+        if state is not None and contract is not None:
+            try:
+                rendered = state.render_rejection(contract, result)
+                if rendered:
+                    return rendered
+            except Exception as e:
+                logger.error(f"[TSS] failed to render rejection for {self.name}: {e}")
+        lines = ["## Shared Project State Conflict (your change was NOT applied)",
+                 f"Reason: {result.rejection_reason}"]
+        if result.detail:
+            lines.append(result.detail)
+        if result.invalidated_by_symbol:
+            who = f" by `{result.invalidated_by_agent}`" if result.invalidated_by_agent else ""
+            lines.append(f"The symbol `{result.invalidated_by_symbol}` your code depends on "
+                         f"was changed or removed{who}.")
+        lines.append("Update your code to be consistent with the current project state, then redo the change.")
+        return "\n".join(lines)

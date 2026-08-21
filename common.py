@@ -7,6 +7,14 @@ from operate import get_file_content
 import tiktoken
 
 
+def _get_encoding(model_name: str):
+    try:
+        return tiktoken.encoding_for_model(model_name)
+    except KeyError:
+        # Claude and other non-OpenAI models: approximate with cl100k_base.
+        return tiktoken.get_encoding("cl100k_base")
+
+
 # common functions that may be used by many agents
 def get_name(role, model_name, use_cache=True):
     system_prompt = f"You are an expert at naming people."
@@ -47,7 +55,7 @@ def generate_diff(file1_path, file2_path):
 
 
 def get_token_num(model_name, system_prompt, user_prompt=None):
-    enc = tiktoken.encoding_for_model(model_name)
+    enc = _get_encoding(model_name)
     length_system_prompt = len(enc.encode(system_prompt))
     if user_prompt is None:
         return length_system_prompt
@@ -55,6 +63,6 @@ def get_token_num(model_name, system_prompt, user_prompt=None):
 
 
 def truncate_user_prompt(model_name, system_prompt, user_prompt, max_token_num):
-    enc = tiktoken.encoding_for_model(model_name)
+    enc = _get_encoding(model_name)
     length_system_prompt = len(enc.encode(system_prompt))
     return enc.decode(enc.encode(user_prompt)[:max_token_num - length_system_prompt])

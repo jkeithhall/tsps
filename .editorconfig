@@ -1,0 +1,6 @@
+# MAGIS upstream uses trailing whitespace on some lines; avoid trim-on-save churn.
+root = true
+
+[*]
+trim_trailing_whitespace = false
+insert_final_newline = false

@@ -47,7 +47,8 @@ def main(args):
         with open(before_review_result_save_path) as f:
             before_review_gen_result_list = json.load(f)
         exist_instance_id_list = [each_result['instance_id'] for each_result in gen_result_list \
-                                  if each_result['model_name_or_path'] == args.version and each_result['model_patch'] is not None]
+                                  if str(each_result.get('model_name_or_path')) == str(args.version)
+                                  and (each_result.get('model_patch') or '').strip()]
         gen_result_list = [each_result for each_result in gen_result_list if each_result['instance_id'] in exist_instance_id_list]
         before_review_gen_result_list = [each_result for each_result in before_review_gen_result_list if each_result['instance_id'] in exist_instance_id_list]
         swe_bench_tasks = [task for task in swe_bench_tasks if task['instance_id'] not in exist_instance_id_list]
@@ -57,7 +58,7 @@ def main(args):
 
     candidate_file_dict = None
     if args.oracle:
-        with open("exp/SWE-bench/instance_oracle_file_dict.json") as f:
+        with open(args.oracle_dict) as f:
             candidate_file_dict = json.load(f)
 
     if os.path.exists(config.local_repo_path):
@@ -129,11 +130,12 @@ def main(args):
         process_args.model_name = args.model_name #"gpt-4-0613" #"gpt-3.5-turbo-0125" #"gpt-4-0613"
         process_args.cache = True
         process_args.hints_text = args.hints_text
+        process_args.enable_tsps = args.enable_tsps
         logger.info(process_args)
         if not args.only_find_file_list:
             patch, before_review_patch = process_main(process_args)
 
-            gen_result = {"instance_id": instance_id, "model_name_or_path": process_args.version,
+            gen_result = {"instance_id": instance_id, "model_name_or_path": str(process_args.version),
                         "model_patch": patch}
             gen_result_list.append(gen_result)
 
@@ -168,19 +170,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--swe_bench_tasks", type=str, help="Path to SWE-bench task instances file", 
                         default="exp/SWE-bench/assets/swe-bench.json")
-    parser.add_argument("--idx_list_file_path", type=str, default="exp/SWE-bench/gpt_4_selected_idx_short_patch.json")
-    parser.add_argument("--model_name", default="gpt-4-0613", help="Default model name")
+    parser.add_argument("--idx_list_file_path", type=str, default=None,
+                        help="Optional JSON list of task indices to subset swe-bench.json")
+    parser.add_argument("--model_name", default=config.default_model_name,
+                        help="Chat model id (default from config.default_model_name / MODEL_NAME env)")
     parser.add_argument("--max_num_for_test", type=int, default=None)
     parser.add_argument("--start_idx", type=int, default=None)
     parser.add_argument("--end_idx", type=int, default=100)
     parser.add_argument("--skip_existing", action="store_true", help="(Optional) Skip existing logs", default=True)
-    parser.add_argument("--oracle", default=True, action="store_true", help="(Optional) Evaluate on oracle setting")
+    parser.add_argument("--oracle", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use an oracle file dict for candidate files (default: on). "
+                             "Pass --no-oracle to use Custodian BM25+LLM file selection instead.")
+    parser.add_argument("--oracle-dict", type=str,
+                        default="exp/SWE-bench/instance_oracle_file_dict.json",
+                        help="Path to instance_id -> [file paths] oracle JSON (used with --oracle)")
     parser.add_argument("--version", type=int, default=240201) # add hints after the issue description
     parser.add_argument("--filter_repofullname", help="(Optional) keeps the repo only", default=None) # 'scikit-learn/scikit-learn')
     parser.add_argument("--sort_by_issue", action="store_true", help="(Optional) Sort by Issue Number for Each Repo", default=False)
     parser.add_argument("--hints_text", action="store_true", help="(Optional) Use hints_text with issue description", default=False)
     parser.add_argument("--only_find_file_list", action="store_true", help="(Optional) finish the process when it generates the candidate_file_list ", default=False)
     parser.add_argument("--bm_top_k", type=int, help="(Optional) Top k for BM25", default=20)
+    parser.add_argument("--enable_tsps", action=argparse.BooleanOptionalAction, default=config.enable_tsps,
+                        help="Enable TSPS orchestration (default: on). Pass --no-enable-tsps for ablation runs.")
     args = parser.parse_args()
     logger = log(__name__).get_log_obj()
     main(args)

@@ -6,6 +6,7 @@ from operate import *
 from chat_with_LLM import chat
 from log import *
 from common import *
+from transactional_state import file_facts
 import config
 
 logger = log(__name__).get_log_obj()
@@ -15,7 +16,7 @@ class Custodian:
     def __init__(self, repo_full_name, issue_number, issue_content, 
                  repository_directory, model_name, use_cache, bm_top_k = 20,
                  virtual_env_folder=config.virtual_env_path,
-                 db_manager=None, task_index=None):
+                 db_manager=None, task_index=None, state=None):
         self.repo_full_name = repo_full_name # supposing its format: [repo_full_name]-[issue_number]
         self.issue_number = issue_number
         if isinstance(issue_content, str):
@@ -26,6 +27,10 @@ class Custodian:
         self.use_cache = use_cache
         self.db_manager = db_manager
         self.task_index = task_index
+        # Optional Transactional Shared State: when attached, the Custodian's
+        # repository-memory pass also populates the TSS with machine-verifiable
+        # AST/symbol facts (alongside its natural-language `_note.md` summaries).
+        self.state = state
 
         self.note_folder = os.path.abspath(os.path.join(virtual_env_folder, self.repo_full_name, str(self.issue_number)))
         os.makedirs(self.note_folder, exist_ok=True)
@@ -155,6 +160,10 @@ class Custodian:
                 f.write(file_summary)
             shutil.copyfile(os.path.join(self.repository_directory, file_path), os.path.join(save_dir, os.path.basename(file_path)))
 
+        # Alongside the NL summary, record machine-verifiable AST/symbol facts and,
+        # when a shared state is attached, populate it.
+        self._record_symbol_facts(file_path)
+
         system_prompt = ("Your task is to assess the relevance of a file in relation to a specific issue. "
                          "A file is considered relevant if modifying it is necessary to resolve the issue.")
         user_prompt = (f"# Issue Description:\n{requirement_text}\n"
@@ -173,5 +182,35 @@ class Custodian:
         logger.info(f"Correlation score between requirement ({requirement_text}) and file_path ({file_path}): {correlation_score}")
         return int(correlation_score)
         
+    def _record_symbol_facts(self, file_path):
+        """Write machine-verifiable AST/symbol facts for `file_path` next to its NL
+        note, and (if a shared state is attached) populate the TSS symbol index.
+
+        Facts are the TSS counterpart of the Custodian's `_note.md` prose: symbols,
+        signatures, imports and the public-export namespace the harness can verify.
+        Best-effort: never raises into the correlation flow."""
+        abs_path = os.path.join(self.repository_directory, file_path)
+        if not os.path.exists(abs_path):
+            return
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                source = f.read()
+        except (OSError, UnicodeDecodeError):
+            return
+        try:
+            facts = file_facts(file_path, source)
+            save_dir = os.path.join(self.note_folder, os.path.dirname(file_path))
+            os.makedirs(save_dir, exist_ok=True)
+            facts_path = os.path.join(save_dir, f"{os.path.basename(file_path).rsplit('.', 1)[0]}_symbols.json")
+            with open(facts_path, "w", encoding="utf-8") as f:
+                json.dump(facts, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to write symbol facts for {file_path}: {e}")
+        if getattr(self, "state", None) is not None:
+            try:
+                self.state.seed(self.repository_directory, [file_path])
+            except Exception as e:
+                logger.error(f"Failed to populate TransactionalSharedState for {file_path}: {e}")
+
     def get_candidate_file_list(self):
         return self.candidate_file_list

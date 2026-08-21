@@ -1,4 +1,5 @@
-import os, pickle, shutil
+import os, re, pickle, shutil, subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 from operate import get_file_content, get_git_tracked_file_path_list, is_code_or_text
 from chat_with_LLM import chat
@@ -6,6 +7,7 @@ from log import log
 from common import get_name, merge_multiple_items
 from member import Member
 from database_manager import DatabaseManager
+from transactional_state import TransactionalSharedState
 import config
 
 
@@ -21,7 +23,7 @@ class Manager:
                  model_name, use_cache=True, candidate_file_path_list=None,
                  project_name=None, role_system_prompt="You are a software development manager.",
                  granularity = "file", prepare_member_folder=True, split_requirement=False, clean_up=True,
-                 version=None, hints_text=False):
+                 version=None, hints_text=False, state=None, enable_tsps=True):
         with open(requirement_file_path, "r") as f:
             self.requirement_file_content = f.read()
         hints_text_fp = os.path.join(os.path.dirname(requirement_file_path), "hints_text.md")
@@ -42,6 +44,8 @@ class Manager:
         self.name = get_name(self.system_prompt, self.model_name, self.use_cache)
         self.granularity = granularity
         self.prepare_member_folder = prepare_member_folder
+        self.enable_tsps = enable_tsps
+        self.experiment_version = version
 
         self.repo_index = db_manager.add_repo(self.project_name, self.repository_directory)
         logger.info("Processing the repository index: %s", self.repo_index)
@@ -116,6 +120,32 @@ class Manager:
             table_string_html += f"<tr><td>{each_member.name}</td><td>{each_member.file_path}</td><td>{each_member.task_description}</td></tr>"
         table_string_html += "</table>"
         db_manager.add_action(self.task_index, table_string_html)
+
+        ## Step 4: build / attach the Transactional Shared Program State (TSS)
+        # One shared, SQLite-backed state per task, seeded from the base repo so every
+        # member's transaction contract is verified against a common ground truth. A
+        # `state` may already be passed in (created by process.main and populated by the
+        # Custodian); otherwise create one keyed by project_name#task_index so standalone
+        # runs stay isolated. Attached to each member below for write-interception.
+        self.state = None
+        if self.enable_tsps:
+            self.state = state
+            try:
+                if self.state is None:
+                    self.state = TransactionalSharedState(repo_key=f"{self.project_name}#{self.task_index}")
+                seed_files = [f for f in self.candidate_file_path_list if isinstance(f, str)]
+                self.state.seed(self.repository_directory, seed_files)
+                for each_member in self.team_member_list:
+                    each_member.state = self.state
+                logger.info(f"Attached TransactionalSharedState (repo_key={self.state.repo_key}), "
+                            f"seeded {len(seed_files)} file(s).")
+                db_manager.add_action(self.task_index, f"Attached Transactional Shared State seeded with {len(seed_files)} file(s).")
+            except Exception as e:
+                logger.error(f"Failed to initialize TransactionalSharedState: {e}")
+                self.state = None
+        else:
+            logger.info("TSPS disabled in manager; running non-transactional ablation mode.")
+            db_manager.add_action(self.task_index, "TSPS disabled; running non-transactional ablation mode.")
 
     def split_requirement(self):
         system_prompt = f"{self.system_prompt} You can split the requirement into atomic requirements."
@@ -199,9 +229,20 @@ class Manager:
         system_prompt = (f"{self.system_prompt}"
                          "Your responsibility is to provide clear guidance and instructions to a developer regarding modifications or improvements needed in a specific code file. "
                          "This guidance should be based on the details provided in the issue description and the existing content of the code file.")
+        # Ground the instruction generator with the exact target file. Without this, a
+        # model can produce advice like "leave this file untouched, the real fix belongs
+        # in file X" when the issue text is skewed toward a sibling file — even though
+        # this file was already confirmed (by the oracle/retrieval file list) to need a
+        # change. That advice then poisons the actual developer's code-generation call.
+        file_note = f"# Target File Path:\n{file_path}\n" if isinstance(file_path, str) else ""
         if file_content is not None:
             user_prompt = (f"Review the issue description and the content of the code file, then provide specific instructions for the developer on the actions they need to take to address the issue with {part_user_prompt}.\n"
+                           f"{file_note}"
                            f"# Issue Description:\n{requirement_text}\n# Code File:\n{file_content}\n"
+                           "This file has been confirmed to require a modification for this issue. Your "
+                           "instructions MUST describe a concrete code change to make in THIS file. Do not "
+                           "say the file should remain unmodified or that the fix belongs solely in a "
+                           "different file, even if a different file would also need a related change.\n"
                            "Respond concisely and clearly, focusing on key actions to resolve the issue. Limit your answer to no more than 100 tokens.")
         else:
             user_prompt = (f"Review the issue description, then provide specific instructions for the developer on the actions they need to take to address the issue with {part_user_prompt}.\n"
@@ -237,6 +278,7 @@ class Manager:
     def build_team(self, granularity="file"):
         self.team = dict()
         self.team_member_list = list()
+        reserved_usernames = set()
         ## Development Group
         if granularity == "both": 
             for file_path in self.atomic_task_dict.keys():
@@ -251,7 +293,9 @@ class Manager:
                                                         self.project_name, prepare_member_folder=self.prepare_member_folder, \
                                                         virtual_env_folder = self.virtual_env_folder, \
                                                         model_name=self.model_name, use_cache=self.use_cache, \
-                                                        db_manager=db_manager, task_index=self.task_index))
+                                                        db_manager=db_manager, task_index=self.task_index,
+                                                        experiment_version=self.experiment_version,
+                                                        reserved_usernames=reserved_usernames))
         elif granularity == "file":
             for file_path in self.atomic_task_dict.keys():
                 file_path_requirement_list = self.get_requirement_list(file_path)
@@ -263,7 +307,9 @@ class Manager:
                                                     self.project_name, prepare_member_folder=self.prepare_member_folder, \
                                                     virtual_env_folder = self.virtual_env_folder, \
                                                     model_name=self.model_name, use_cache=self.use_cache, \
-                                                    db_manager=db_manager, task_index=self.task_index))
+                                                    db_manager=db_manager, task_index=self.task_index,
+                                                    experiment_version=self.experiment_version,
+                                                    reserved_usernames=reserved_usernames))
         elif granularity == "atomic_requirement":
             for requirement_text in self.atomic_task_dict.keys():
                 task_description = self.atomic_task_dict[requirement_text]
@@ -274,13 +320,30 @@ class Manager:
                                                     self.project_name, prepare_member_folder=self.prepare_member_folder, \
                                                     virtual_env_folder = self.virtual_env_folder, \
                                                     model_name=self.model_name, use_cache=self.use_cache, \
-                                                    db_manager=db_manager, task_index=self.task_index))
+                                                    db_manager=db_manager, task_index=self.task_index,
+                                                    experiment_version=self.experiment_version,
+                                                    reserved_usernames=reserved_usernames))
 
     def hire_one_employee(self, requirement_text, task_description, file_path=None):
         db_manager.add_action(self.task_index, "Hire a New Employee...")
         system_prompt = f"{self.system_prompt} You have a clear understanding of the qualities and skills needed in an employee to address specific issues and follow given instructions."
+        # Ground the persona in the assigned file. requirement_text is the FULL shared
+        # issue text (which may explicitly name a sibling file, e.g. in a traceback);
+        # without stating which file this candidate is for, the model can free-associate
+        # that sibling filename into the persona description, which then becomes
+        # self.system_prompt for every future call this member makes — including the
+        # actual code-generation call.
+        file_note = ""
+        if isinstance(file_path, str):
+            file_note = (
+                f"# Assigned File:\n{file_path}\n"
+                f"This candidate is hired specifically to make the required change in `{file_path}`. "
+                f"Other files mentioned in the Issue Background belong to other team members; do not "
+                f"describe this candidate as needing to work on, or defer to, any other file.\n"
+            )
         user_prompt = (f"Based on the Issue Background and the Instructions on this file:\n"
                        f"# Issue Background:\n{requirement_text}\n"
+                       f"{file_note}"
                        f"# Instructions:\n{task_description}\n"
                        f"Craft a brief and precise description of your ideal candidate."
                        f"Ensure that your response begins with the phrase 'You are'.")
@@ -357,85 +420,190 @@ class Manager:
         get_action_order_request = db_manager.add_request(self.role_index, user_prompt)
         comment_response = chat(self.system_prompt, user_prompt, model_name=self.model_name, use_cache=self.use_cache, \
                                 db_manager=db_manager, request_index=get_action_order_request)
+        logger.debug(f"comment_response:\n{comment_response}")
 
-        if len(self.team_member_list) <= 3:
-            example_code = ("# Step 1: the 2-th member works\n"
-                            "self.team_member_list[2].work()\n\n"
-                            "# Step 2: the 0-th member works\n"
-                            "self.team_member_list[0].work()\n\n\n"
-                            "# Step 3: the 1-th member works\n"
-                            "self.team_member_list[1].work()\n")
-        else:
-            example_code = ("import multiprocessing\n\n\n"
-                            "# Step 1: the 3-th member works\n"
-                            "self.team_member_list[3].work()\n\n"
-                            "# Step 2: the 0-th member works\n"
-                            "self.team_member_list[0].work()\n\n\n"
-                            "# Step 3: the 1, 4, 5-th members work in parallel\n"
-                            "parallel_p1 = multiprocessing.Process(self.team_member_list[1].work())\n"
-                            "parallel_p2 = multiprocessing.Process(self.team_member_list[4].work())\n"
-                            "parallel_p3 = multiprocessing.Process(self.team_member_list[5].work())\n\n"
-                            "parallel_p1.start()\n"
-                            "parallel_p2.start()\n"
-                            "parallel_p3.start()\n\n"
-                            "parallel_p1.join()\n"
-                            "parallel_p2.join()\n"
-                            "parallel_p3.join()\n\n\n"
-                            "# Step 4: the 6-th member works\n"
-                            "self.team_member_list[6].work()\n\n"
-                            "# Step 5: the 2-th member works\n"
-                            "self.team_member_list[2].work()\n")
-        user_prompt = ( "# Action Order Comment:\n"
-                        f"{comment_response}\n\n"
-                        "Generate a segment of a Python script based on the above comment.\n"
-                        "Use the existing variable `self.team_member_list` and its `.work()` method.\n"
-                        f"Example Format:\n```python\n{example_code}\n```\n"
-                        "Ensure the generated script segment closely adheres to the example format." )
-        db_manager.add_action(self.task_index, "Generate the Python Script for Team Work ...")
-        get_code_request = db_manager.add_request(self.role_index, user_prompt)
-        code_response = chat(self.system_prompt, user_prompt, model_name=self.model_name, use_cache=self.use_cache, \
-                             db_manager=db_manager, request_index=get_code_request)
-        logger.debug(f"user_prompt:\n{user_prompt}")
+        # Parse the LLM's natural-language order into a deterministic execution plan
+        # instead of exec()-ing LLM-generated code. member_order_plan is a list of
+        # "steps", each a list of member indices; steps run sequentially, and members
+        # within a step may run on a thread pool (see implement()) so the shared
+        # transactional state sees genuine concurrency.
+        self.member_order_plan = self._parse_member_order(comment_response)
+        logger.info(f"Parsed member order plan (steps of member indices): {self.member_order_plan}")
+        db_manager.add_action(self.task_index, f"Parsed team work order: {self.member_order_plan}")
+        return comment_response
 
-        self.implement_code = code_response.split("```python")[1].split("```")[0]
-        return code_response
-    
+    def _parse_member_order(self, comment_response):
+        """Deterministically parse an action-order comment into a list of steps.
+
+        Each step is a list of member indices to run; steps execute in order, members within a
+        step may run concurrently. We only read integers that appear AFTER the first ``:`` on a
+        line (so the "Step N" counter is never mistaken for a member index). Every member is run
+        exactly once: duplicates are dropped (first mention wins) and any member never mentioned
+        is appended as a trailing serial step so nobody is silently skipped.
+        """
+        num_members = len(self.team_member_list)
+        plan = []
+        seen = set()
+        for line in (comment_response or "").split("\n"):
+            if ":" not in line:
+                continue
+            remainder = line.split(":", 1)[1]
+            indices = []
+            for token in re.findall(r"\d+", remainder):
+                idx = int(token)
+                if 0 <= idx < num_members and idx not in seen:
+                    seen.add(idx)
+                    indices.append(idx)
+            if indices:
+                plan.append(indices)
+        # Append any members the LLM never scheduled, each as its own serial step.
+        leftover = [i for i in range(num_members) if i not in seen]
+        plan.extend([i] for i in leftover)
+        # Total fallback: nothing parsed -> run every member serially in index order.
+        if not plan:
+            plan = [[i] for i in range(num_members)]
+        return plan
+
     def implement(self):
-        # ### wait for the admin to confirm
-        # input_flag = input("Confirm the main code? (Y/n)")
-        # if input_flag != "y" and input_flag != "Y" and input_flag != '':
-        #     if input_flag == "n" or input_flag == "N":
-        #         logger.info("Please modify the main code.")
-        #         exit(0)
-        #     raise Exception("Main code is not confirmed.")
+        plan = getattr(self, "member_order_plan", None)
+        if not plan:
+            plan = [[i] for i in range(len(self.team_member_list))]
+        # In TSPS-off ablation mode we force serial execution to avoid adding a
+        # thread-level concurrency confound to non-transactional runs.
+        serial = (not self.enable_tsps) or getattr(config, "serial_execution", False)
+        max_parallel = max(1, getattr(config, "max_parallel_members", 8))
+
+        db_manager.add_action(self.task_index, "Team Work Started ...")
+        for step_i, step in enumerate(plan):
+            members = [self.team_member_list[i] for i in step if 0 <= i < len(self.team_member_list)]
+            if not members:
+                continue
+            if serial or len(members) == 1:
+                for member in members:
+                    self._run_member(member)
+            else:
+                workers = min(len(members), max_parallel)
+                db_manager.add_action(self.task_index,
+                                      f"Step {step_i + 1}: {len(members)} members working in parallel ...")
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    # Materialize the list so every task is submitted before we block on results.
+                    list(executor.map(self._run_member, members))
+
+    def _run_member(self, member):
+        """Run one member's work(), isolating failures so one member cannot abort the whole team."""
         try:
-            db_manager.add_action(self.task_index, "Team Work Started ...")
-            exec(self.implement_code)
+            member.work()
         except Exception as e:
-            logger.error("1st Try, Implement error:")
+            logger.error(f"Member {getattr(member, 'name', '?')} failed to implement its task:")
             logger.error(e)
-            try:
-                db_manager.add_action(self.task_index, "Team Work Restarted ...")
-                for each in self.team_member_list:
-                    each.work()
-            except Exception as e:
-                logger.error("Finally, Implement error:")
-                logger.error(e)
-                db_manager.add_action(self.task_index, "Failed to Implement the Python Script for Team Work ...")
+            db_manager.add_action(self.task_index,
+                                  f"{getattr(member, 'name', 'A member')} failed to complete its task.")
 
     def merge_code_change(self):
+        """Assemble the final patch.
+
+        With a Transactional Shared State attached, the final patch is
+        *materialized* from committed state (one globally-consistent diff) rather
+        than string-concatenating each developer's isolated `gen.patch`. The
+        `before_review` artifact keeps the original first-attempt concatenation so
+        the pre/post-review comparison stays available. Falls back entirely to the
+        original concatenation when no state is attached (TSS init failed).
+        """
+        before_review_patch = self._concat_member_patches("gen_0.patch")
+        if (not self.enable_tsps) or getattr(self, "state", None) is None:
+            return self._concat_member_patches("gen.patch"), before_review_patch
+
+        materialized = self._materialize_state_patch()
+        if materialized is None:
+            # materialization failed (e.g. git error) -> safe fallback
+            logger.error("State materialization failed; falling back to patch concatenation.")
+            return self._concat_member_patches("gen.patch"), before_review_patch
+        if not materialized.strip():
+            logger.warning(
+                "State materialization produced an empty patch (likely no-op commits); "
+                "falling back to patch concatenation."
+            )
+            return self._concat_member_patches("gen.patch"), before_review_patch
+        return materialized, before_review_patch
+
+    def _concat_member_patches(self, patch_name):
+        """Original behavior: concatenate each member's saved patch file."""
         patch = ""
-        before_review_patch = ""
+        seen_paths = set()
         for member in self.team_member_list:
-            patch_dir = os.path.join(config.exp_result_save_path, self.project_name, member.username)
-            if not os.path.exists(os.path.join(patch_dir, "gen.patch")):
-                logger.error(f"Patch file does not exist: {os.path.join(patch_dir, 'gen.patch')}")
+            patch_path = os.path.join(config.exp_result_save_path, self.project_name, member.username, patch_name)
+            if patch_path in seen_paths:
                 continue
-            with open(os.path.join(patch_dir, "gen.patch")) as f:
+            seen_paths.add(patch_path)
+            if not os.path.exists(patch_path):
+                logger.error(f"Patch file does not exist: {patch_path}")
+                continue
+            with open(patch_path, encoding="utf-8") as f:
                 patch += f.read() + '\n'
-            if not os.path.exists(os.path.join(patch_dir, "gen_0.patch")):
-                logger.error(f"Patch file does not exist: {os.path.join(patch_dir, 'gen.patch')}")
-                continue
-            with open(os.path.join(patch_dir, "gen_0.patch")) as f:
-                before_review_patch += f.read() + '\n'
-        return patch, before_review_patch
+        return patch
+
+    def _materialize_state_patch(self):
+        """Materialize committed transactional state into one coherent git diff.
+
+        Writes each committed (agent-authored) file's content into the base-commit
+        manager repo working tree, runs `git diff` (the same tool MAGIS uses, so the
+        output format matches what the SWE-bench harness expects), then restores the
+        working tree. Returns the patch string, or None on failure.
+        """
+        modified = self.state.iter_committed(only_modified=True)
+        if not modified:
+            return ""
+        repo = self.repository_directory
+        backups = {}
+        created = []
+        changed_paths = []
+        try:
+            for file_path, content in modified:
+                abs_path = os.path.join(repo, file_path)
+                if os.path.exists(abs_path):
+                    with open(abs_path, "r", encoding="utf-8") as fh:
+                        backups[file_path] = fh.read()
+                    if backups[file_path] == content:
+                        logger.info(
+                            f"Skipping no-op commit for {file_path} during materialization."
+                        )
+                        continue
+                else:
+                    created.append(file_path)
+                    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                changed_paths.append(file_path)
+                with open(abs_path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+            if not changed_paths:
+                logger.warning("No net file changes to materialize from committed state.")
+                return ""
+            # Stage the changes and diff the index against HEAD (the base commit).
+            # Staging (vs intent-to-add) cleanly includes new files; --no-renames
+            # prevents git from pairing an added file with a modified one as a rename.
+            subprocess.run(["git", "add", "--"] + changed_paths, cwd=repo,
+                           capture_output=True, text=True)
+            result = subprocess.run(["git", "diff", "--cached", "--no-renames", "--"] + changed_paths,
+                                    cwd=repo, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"git diff failed during materialization: {result.stderr}")
+                return None
+            logger.info(f"Materialized patch from committed state for {len(changed_paths)} file(s).")
+            return result.stdout
+        except Exception as e:
+            logger.error(f"Error materializing state patch: {e}")
+            return None
+        finally:
+            # Unstage, then restore the working tree so the manager repo is left untouched.
+            subprocess.run(["git", "reset", "-q", "--"] + changed_paths, cwd=repo,
+                           capture_output=True, text=True)
+            for file_path, original in backups.items():
+                try:
+                    with open(os.path.join(repo, file_path), "w", encoding="utf-8") as fh:
+                        fh.write(original)
+                except OSError as e:
+                    logger.error(f"Failed to restore {file_path}: {e}")
+            for file_path in created:
+                try:
+                    os.remove(os.path.join(repo, file_path))
+                except OSError:
+                    pass

@@ -27,11 +27,12 @@ def main(args):
     process_args.only_find_file_list = args.only_find_file_list
     process_args.hints_text = args.hints_text
     process_args.bm_top_k = args.bm_top_k
+    process_args.enable_tsps = args.enable_tsps
     logger.info(process_args)
 
     patch, before_review_patch = process_main(process_args)
 
-    gen_result = {"instance_id": instance_id, "model_name_or_path": process_args.version,
+    gen_result = {"instance_id": instance_id, "model_name_or_path": str(process_args.version),
                 "model_patch": patch}
     os.makedirs(args.result_save_dir, exist_ok=True)
     with open(os.path.join(args.result_save_dir, "result.json"), "w") as f:
@@ -53,11 +54,13 @@ if __name__ == "__main__":
     parser.add_argument("--result_save_dir", type=str, default="", help="Result save directory")
     parser.add_argument("--candidate_file_path_list", type=str, nargs='+', help="Candidate file path list")
     parser.add_argument("--requirement", type=str, default="", help="Requirement")
-    parser.add_argument("--model_name", default="gpt-4-0613", help="Default LLM name")
+    parser.add_argument("--model_name", default=config.default_model_name, help="Chat model id")
     parser.add_argument("--version", type=int, default=240101, help="Version to mark the experiment")
     parser.add_argument("--hints_text", action="store_true", help="(Optional) Use hints_text with issue description")
     parser.add_argument("--only_find_file_list", type=bool, default=False, help="Only find file list")
     parser.add_argument("--bm_top_k", type=int, default=20, help="Top k for BM25")
+    parser.add_argument("--enable_tsps", action=argparse.BooleanOptionalAction, default=config.enable_tsps,
+                        help="Enable TSPS orchestration (default: on). Pass --no-enable-tsps for ablation runs.")
     args = parser.parse_args()
     logger = log(__name__).get_log_obj()
     main(args)
